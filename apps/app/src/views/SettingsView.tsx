@@ -1178,6 +1178,11 @@ const EXPERIMENT_DEFINITIONS: Record<
     description:
       "When a machine's connection to the server drops for under 30 seconds, it picks up where it left off instead of reconnecting from scratch, so its terminals and running requests carry on. Applies from the next drop.",
   },
+  savedThreads: {
+    label: "Save archived threads to files",
+    description:
+      "Save threads out of the database into compressed thread files with bb thread save, or after a delay you choose in the Storage retention plugin, and add bb thread export and import. Saved threads are listed in Settings → Archived threads → Saved to files, where Restore brings them back with their full history. Turning this off stops new saves; saved threads can still be restored.",
+  },
 
   serverMove: {
     label: "Server move",

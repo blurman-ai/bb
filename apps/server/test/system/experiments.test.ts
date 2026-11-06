@@ -66,6 +66,7 @@ describe("experiments settings", () => {
       expect(put.status).toBe(200);
       expect(experimentsSchema.parse(await readJson(put))).toEqual({
         agentCpuPriority: false,
+        savedThreads: false,
         compactExpiredCache: false,
         keyedPluginCss: false,
         serverMove: true,

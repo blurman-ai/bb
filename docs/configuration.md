@@ -1082,6 +1082,12 @@ either way.
   including the restart an update performs: running provider processes serve
   new threads too, and a lowered process cannot be raised again. See
   [slow database operations](debugging-and-qa.md#slow-database-operations).
+- `savedThreads` (off for early adopters too) enables `bb thread save`
+  (SDK `threads.experimental_save`), `bb thread export`, `bb thread import`
+  and their routes, which answer 403 `saved_threads_experiment_disabled` while
+  it is off. A save writes the thread to a thread file under `<data dir>/archive/threads/<thread id>.jsonl.zst`, verifies it, hides the thread, and then removes its rows from `bb.db` in small background batches. Nothing is lost: the file holds the thread, every event, its plugin metadata, tabs, prompt history, search index rows and attachments, and Settings → Archived threads → Saved to files (or `bb thread saved restore <id>`) brings it back as it was. A saved thread leaves the archived list, search and the sidebar until restored. Pinned and running threads, threads with queued messages, prompts or background tasks, threads open in a client, and threads that other threads still point at as their parent, source or lifecycle owner are refused with 409; save the children first. To save archived threads automatically after a delay, set Save archived threads to files in the Storage & retention plugin (`bb storage retention --save-after 14 --save --yes`); a restored thread counts as archived from the moment it was restored. The files are JSONL under zstd that `zstdcat <file> | jq` and `rg -z` read, whose first line names the thread, title, project, and provider. Turning the experiment off drops saves that
+  have not finished; saved threads can still be listed, restored, downloaded
+  and deleted with `bb thread saved`.
 - `compactExpiredCache` (on for early adopters) reports `compactionOfferAt` on a thread's context
   usage (timeline `contextWindowUsage` and `bb thread context`) once the
   provider has reported a prompt-cache lifetime, the provider supports manual

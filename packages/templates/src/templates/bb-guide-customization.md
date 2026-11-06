@@ -214,6 +214,10 @@ plugins' UI, such as the sidebar and composer, skip them; it applies after a
 reload and defaults on for early adopters.
 `pluginUpdates` lists plugin updates on Settings → Updates with Update and
 Update all, and counts them in the sidebar updates badge; see `bb guide plugins`.
+`savedThreads` (off for early adopters too) enables `bb thread save`,
+`bb thread export` and `bb thread import`, and lets the Storage & retention
+plugin save archived threads to files after a delay; see `bb guide
+thread-lifecycle`.
 `skipFocusedThreadNotifications` skips the web and desktop system notification
 for a thread open in a visible, focused bb window or tab. It defaults on for
 early adopters.

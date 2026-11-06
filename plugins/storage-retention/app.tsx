@@ -70,6 +70,7 @@ type Machine = Awaited<
 >[number];
 const PANEL = "storage";
 const ARCHIVE_PRESETS = [7, 14, 30, 60, 90, 180, 365];
+const SAVE_PRESETS = [7, 14, 30, 60, 90];
 const DELETE_PRESETS = [7, 30, 90, 180, 365];
 function bytes(value: number) {
   if (value < 1024) return `${value} B`;
@@ -616,6 +617,7 @@ function StoragePage({
     updateState(next);
     const description = {
       archiveAfterDays: "Archive inactive threads",
+      saveAfterDays: "Save archived threads to files",
       deleteAfterDays: "Delete archived threads",
       deleteStorageOnArchive: "Delete thread storage on archive",
       deleteDevDataOnCheckoutRemoval:
@@ -658,6 +660,7 @@ function StoragePage({
   const retentionOn =
     state !== null &&
     (state.policy.archiveAfterDays !== null ||
+      state.policy.saveAfterDays !== null ||
       state.policy.deleteAfterDays !== null);
   const report = detail?.report;
   const missingDev =
@@ -1715,7 +1718,7 @@ function StoragePage({
             <section className="space-y-3">
               <SectionHeading
                 title="Automatic retention"
-                description="Archive or delete inactive threads across all projects. Changes save automatically."
+                description="Archive, save to files or delete inactive threads across all projects. Changes save automatically."
                 badge={retentionOn ? "Checks hourly" : "Off"}
               />
               <div
@@ -1741,6 +1744,16 @@ function StoragePage({
                     disabled={savingSetting}
                     onChange={(value) =>
                       void saveSetting("archiveAfterDays", value)
+                    }
+                  />
+                  <RetentionField
+                    label="Save archived threads to files"
+                    description="After this long in the archive, move them out of the database into thread files you can restore. Needs the Save archived threads to files experiment."
+                    presets={SAVE_PRESETS}
+                    value={policy.saveAfterDays}
+                    disabled={savingSetting}
+                    onChange={(value) =>
+                      void saveSetting("saveAfterDays", value)
                     }
                   />
                   <RetentionField
@@ -1801,7 +1814,7 @@ function StoragePage({
                     <div className="px-4 py-2.5">
                       <p className="text-xs text-muted-foreground">
                         {state.lastRun
-                          ? `Last checked ${ago(state.lastRun.ranAt)} · ${state.lastRun.archivedCount} archived · ${state.lastRun.deletedCount} deleted${state.lastRun.failedCount ? ` · ${state.lastRun.failedCount} failed` : ""}`
+                          ? `Last checked ${ago(state.lastRun.ranAt)} · ${state.lastRun.archivedCount} archived · ${state.lastRun.savedCount} saved · ${state.lastRun.deletedCount} deleted${state.lastRun.failedCount ? ` · ${state.lastRun.failedCount} failed` : ""}`
                           : "The first check runs within the hour."}
                       </p>
                     </div>
