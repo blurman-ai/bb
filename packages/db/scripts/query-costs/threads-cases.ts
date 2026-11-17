@@ -29,7 +29,9 @@ import {
   pickThreadPruningThread,
 } from "../../src/data/thread-pruning.js";
 import {
+  cancelThreadPurge,
   deleteThreadPurgeBatch,
+  isThreadPurgeRequested,
   nextThreadPurge,
   requestThreadPurge,
 } from "../../src/data/thread-purges.js";
@@ -714,6 +716,16 @@ const PURGE_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
   {
     name: `${PURGES}#nextThreadPurge`,
     run: (db) => nextThreadPurge(db, { excludedThreadIds: new Set() }),
+  },
+  {
+    name: `${PURGES}#isThreadPurgeRequested`,
+    run: (db, _fixture, seed) =>
+      isThreadPurgeRequested(db, seed.deletedPurgeThreadId),
+  },
+  {
+    name: `${PURGES}#cancelThreadPurge`,
+    run: (db, _fixture, seed) =>
+      cancelThreadPurge(db, seed.deletedPurgeThreadId),
   },
   {
     name: `${PURGES}#deleteThreadPurgeBatch`,

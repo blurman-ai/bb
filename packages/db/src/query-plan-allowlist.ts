@@ -79,6 +79,10 @@ export const QUERY_PLAN_ALLOWLIST: readonly QueryPlanAllowlistEntry[] = [
     `${THREADS}#isThreadAwaitingTurnStartPastDeadline`,
     "Rechecks one deadline candidate; reads its turn/completed rows once, linear in turns",
   ),
+  boundedCorrelatedEvents(
+    "packages/db/src/data/saved-threads.ts#isThreadSavable",
+    "Checks one thread by id, so each eligibility subquery runs once; the background-task check probes one completion per started background task of that thread",
+  ),
   {
     rule: "full-scan",
     table: "prompt_history_entries",
