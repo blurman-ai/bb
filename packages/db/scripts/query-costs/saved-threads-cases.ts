@@ -2,7 +2,6 @@ import type { DbConnection } from "../../src/connection.js";
 import {
   deleteSavedThread,
   getSavedThread,
-  getSavedThreadTotals,
   hideThreadForSaving,
   insertThreadHistoryRows,
   insertThreadTableRow,
@@ -188,10 +187,6 @@ const SAVED_THREAD_CASES: readonly QueryCostCase<SavedThreadsSeed>[] = [
   {
     name: `${SAVED}#deleteSavedThread`,
     run: (db, _fixture, seed) => deleteSavedThread(db, seed.savedThreadId),
-  },
-  {
-    name: `${SAVED}#getSavedThreadTotals`,
-    run: (db) => getSavedThreadTotals(db),
   },
   {
     name: `${SAVED}#readThreadEventWindow`,

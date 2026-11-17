@@ -71,13 +71,6 @@ export interface ThreadEventWindow {
   rows: ThreadHistoryEventRow[];
 }
 
-export interface SavedThreadTotals {
-  packedBytes: number;
-  rawBytes: number;
-  rowCount: number;
-  savedThreads: number;
-}
-
 const LISTED_STATES: readonly SavedThreadState[] = ["saved"];
 
 function saveEligibilitySql(inProgress: boolean) {
@@ -247,19 +240,6 @@ export function updateSavedThreadInState(
 
 export function deleteSavedThread(db: DbQueryConnection, threadId: string): void {
   db.delete(savedThreads).where(eq(savedThreads.threadId, threadId)).run();
-}
-
-export function getSavedThreadTotals(db: DbQueryConnection): SavedThreadTotals {
-  const row = db.get<SavedThreadTotals>(sql`
-    SELECT
-      count(*) AS savedThreads,
-      coalesce(sum(packed_bytes), 0) AS packedBytes,
-      coalesce(sum(raw_bytes), 0) AS rawBytes,
-      coalesce(sum(row_count), 0) AS rowCount
-    FROM saved_threads
-    WHERE state = 'saved'
-  `);
-  return row ?? { packedBytes: 0, rawBytes: 0, rowCount: 0, savedThreads: 0 };
 }
 
 const eventWindowSql = (args: ThreadEventWindowArgs) => sql`
