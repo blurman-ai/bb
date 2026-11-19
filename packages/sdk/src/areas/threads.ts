@@ -743,7 +743,7 @@ export interface ThreadsArea {
    * Permanently delete a saved thread's file. Experimental: see
    * docs/api_to_audit.md.
    */
-  experimental_deleteSaved(args: ThreadActionArgs): Promise<{ ok: true }>;
+  experimental_deleteSaved(args: ThreadActionArgs): Promise<OperationResponse>;
   updatePluginMetadata(
     args: ThreadPluginMetadataUpdateArgs,
   ): Promise<ThreadPluginMetadataResult>;

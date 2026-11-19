@@ -1809,7 +1809,7 @@ export const publicApiRoutes = {
       path: "/saved-threads/:id",
       method: "delete",
       request: noRequest<PathId>(),
-      response: jsonResponse<{ ok: true }>(),
+      response: jsonResponse<OperationResponse>(),
     }),
     /** Download a saved thread's file. */
     savedFile: defineRoute({

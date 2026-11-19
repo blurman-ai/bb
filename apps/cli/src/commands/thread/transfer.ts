@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { Command } from "commander";
 import { action } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
-import { outputJson, requireThreadIdOrSelf } from "../helpers.js";
+import { outputJson } from "../../command-result.js";
+import { requireThreadIdOrSelf } from "../helpers.js";
 
 interface ThreadExportCommandOptions {
   json?: boolean;

@@ -22,6 +22,7 @@ import {
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { requirePublicThread } from "../../services/lib/entity-lookup.js";
+import { operationComplete } from "../../services/lib/operation-response.js";
 import {
   removeSavedThreadFile,
   savedThreadFileExists,
@@ -216,7 +217,7 @@ export function registerThreadTransferRoutes(app: Hono, deps: AppDeps): void {
     }
     deleteSavedThread(deps.db, saved.threadId);
     await removeSavedThreadFile(deps.config.dataDir, saved.threadId);
-    return context.json({ ok: true as const });
+    return context.json(operationComplete());
   });
 
   get(routes.savedFile, async (context) => {
