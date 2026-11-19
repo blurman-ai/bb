@@ -134,6 +134,9 @@ Lifecycle:
   title, project and provider, then the thread's rows, every event in sequence
   order, and its attachments. `zstdcat <file> | jq` and `rg -z` read it
   without bb. Import only accepts a file whose project is on this server.
+  Importing a file of a saved thread restores the saved copy first, so an
+  older export never replaces newer history; a thread still being deleted
+  can be imported once the deletion finishes.
 
   bb thread restore-environment [id]       Restore a destroyed workspace
     --self                                 Restore current thread

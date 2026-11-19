@@ -1,4 +1,5 @@
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { eq, sql } from "drizzle-orm";
@@ -8,7 +9,7 @@ import {
   deleteThreadPurgeBatch,
   getSavedThread,
   getThread,
-  insertThreadTableRow,
+  insertHiddenThreadRow,
   listSweepItemFailures,
   pinThread,
   readThreadTableRows,
@@ -626,7 +627,7 @@ describe("saved threads", () => {
       const saved = getSavedThread(harness.db, thread.id);
       if (saved === null) throw new Error("expected a saved thread");
       upsertSavedThread(harness.db, { ...saved, state: "restoring" });
-      insertThreadTableRow(harness.db, threadRow);
+      insertHiddenThreadRow(harness.db, threadRow, Date.now());
       await reconcileSavedThreads(harness.deps);
       expect(savedState(harness, thread.id)).toBe("saved");
       expect(getThread(harness.db, thread.id)?.deletedAt).toEqual(
@@ -671,4 +672,215 @@ describe("saved threads", () => {
       expect(getThread(harness.db, thread.id)).not.toBeNull();
     });
   });
+
+  it("restores the saved copy before merging an older imported file, so newer history survives", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedArchivedConversation(harness);
+      const older = Buffer.from(
+        await sdkFor(harness).threads.experimental_export({
+          threadId: thread.id,
+        }),
+      );
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        providerThreadId: `provider-${thread.id}`,
+        scope: turnScope("turn-2"),
+        sequence: 20,
+        type: "turn/started",
+        data: {},
+      });
+      harness.db.run(sql`DELETE FROM thread_pruning_work`);
+      const newer = allRows(harness, thread.id);
+      await saveThread(harness, thread.id);
+
+      const response = await importThread(harness, older);
+      expect(response.status).toBe(200);
+      expect(await readJson(response)).toMatchObject({ insertedRows: 0 });
+      expect(allRows(harness, thread.id)).toEqual(newer);
+      expect(getThread(harness.db, thread.id)?.deletedAt).toBeNull();
+      expect(savedState(harness, thread.id)).toBe("restored");
+    });
+  });
+
+  it("abandons a save when the thread changes without a new event", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedArchivedConversation(harness);
+      expect((await requestSave(harness, thread.id)).status).toBe(200);
+      const step = ThreadFileExport.prototype.step;
+      const spy = vi
+        .spyOn(ThreadFileExport.prototype, "step")
+        .mockImplementationOnce(function (this: ThreadFileExport) {
+          harness.db.run(
+            sql`UPDATE threads SET archived_at = NULL, updated_at = updated_at + 1 WHERE id = ${thread.id}`,
+          );
+          return step.call(this);
+        });
+      await runSaves(harness);
+      spy.mockRestore();
+      expect(savedState(harness, thread.id)).toBeNull();
+      expect(getThread(harness.db, thread.id)?.deletedAt).toBeNull();
+      expect(countRows(harness, "thread_purges", thread.id)).toBe(0);
+      await expect(
+        stat(savedThreadFilePath(harness.config.dataDir, thread.id)),
+      ).rejects.toThrow();
+    });
+  });
+
+  it("refuses a second restore of the same thread while the first is running", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedArchivedConversation(harness);
+      const before = allRows(harness, thread.id);
+      await saveThread(harness, thread.id);
+      const restore = () =>
+        Promise.resolve(
+          harness.app.request(`/api/v1/saved-threads/${thread.id}/restore`, {
+            method: "POST",
+          }),
+        );
+      const statuses = (await Promise.all([restore(), restore()]))
+        .map((response) => response.status)
+        .sort();
+      expect(statuses).toEqual([200, 409]);
+      await runThreadPurges(harness.deps);
+      expect(allRows(harness, thread.id)).toEqual(before);
+      expect(getThread(harness.db, thread.id)?.deletedAt).toBeNull();
+      expect(savedState(harness, thread.id)).toBe("restored");
+    });
+  });
+
+  it("keeps a restoring thread hidden until all of its rows are back", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedArchivedConversation(harness);
+      const eventCount = allRows(harness, thread.id).length;
+      await saveThread(harness, thread.id);
+      const seen: string[] = [];
+      let done = false;
+      const restored = sdkFor(harness)
+        .threads.experimental_restoreSaved({ threadId: thread.id })
+        .finally(() => {
+          done = true;
+        });
+      while (!done) {
+        const row = getThread(harness.db, thread.id);
+        const complete = allRows(harness, thread.id).length === eventCount;
+        seen.push(
+          row === null
+            ? "absent"
+            : row.deletedAt !== null
+              ? "hidden"
+              : complete
+                ? "visible"
+                : "visible with missing events",
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      await restored;
+      expect(seen).toContain("hidden");
+      expect(seen).not.toContain("visible with missing events");
+      expect(getThread(harness.db, thread.id)?.deletedAt).toBeNull();
+    });
+  });
+
+  it("refuses to import into a thread that is still being deleted, then recreates it once deleted", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedArchivedConversation(harness);
+      const before = allRows(harness, thread.id);
+      const bytes = Buffer.from(
+        await sdkFor(harness).threads.experimental_export({
+          threadId: thread.id,
+        }),
+      );
+      await sdkFor(harness).threads.delete({
+        threadId: thread.id,
+        childThreadsConfirmed: true,
+      });
+      expect(getThread(harness.db, thread.id)?.deletedAt).toEqual(
+        expect.any(Number),
+      );
+
+      const refused = await importThread(harness, bytes);
+      expect(refused.status).toBe(409);
+      expect(JSON.stringify(await readJson(refused))).toContain(
+        "still being deleted",
+      );
+
+      harness.db.delete(threads).where(eq(threads.id, thread.id)).run();
+      expect((await importThread(harness, bytes)).status).toBe(200);
+      expect(allRows(harness, thread.id)).toEqual(before);
+      expect(getThread(harness.db, thread.id)?.deletedAt).toBeNull();
+      expect(savedState(harness, thread.id)).toBeNull();
+    });
+  });
+
+  it("purges a half-imported thread at startup", async () => {
+    await withTestHarness(async (harness) => {
+      const { project, thread } = seedArchivedConversation(harness);
+      const threadRow = readThreadTableRows(harness.db, thread.id).find(
+        (row) => row.table === "threads",
+      );
+      if (threadRow === undefined) throw new Error("expected a thread row");
+      harness.db.delete(threads).where(eq(threads.id, thread.id)).run();
+      upsertSavedThread(harness.db, {
+        archivedAt: null,
+        formatVersion: 1,
+        packedBytes: 0,
+        projectId: project.id,
+        providerId: "codex",
+        rawBytes: 0,
+        restoredAt: null,
+        rowCount: 0,
+        savedAt: null,
+        state: "restoring",
+        threadCreatedAt: 0,
+        threadId: thread.id,
+        throughSequence: 0,
+        title: null,
+        updatedAt: 0,
+      });
+      insertHiddenThreadRow(harness.db, threadRow, Date.now());
+
+      await reconcileSavedThreads(harness.deps);
+      await runThreadPurges(harness.deps);
+
+      expect(savedState(harness, thread.id)).toBeNull();
+      expect(getThread(harness.db, thread.id)).toBeNull();
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "fails a save whose attachment can't be read instead of dropping the attachment",
+    async () => {
+      await withTestHarness(async (harness) => {
+        const { project, thread } = seedArchivedConversation(harness);
+        const attachment = await storeAttachment(
+          harness.db,
+          harness.config.dataDir,
+          project.id,
+          new File(["hello attachment"], "note.txt", { type: "text/plain" }),
+        );
+        acquireProjectAttachmentOwnership(harness.db, thread.id, [
+          attachment.path,
+        ]);
+        const path = join(
+          harness.config.dataDir,
+          "attachments",
+          project.id,
+          attachment.path,
+        );
+        await chmod(path, 0o000);
+        try {
+          expect((await requestSave(harness, thread.id)).status).toBe(200);
+          await runSaves(harness);
+          expect(savedState(harness, thread.id)).toBe("saving");
+          expect(getThread(harness.db, thread.id)?.deletedAt).toBeNull();
+          expect(
+            listSweepItemFailures(harness.db, "thread-save"),
+          ).toMatchObject([{ attempts: 1, itemKey: thread.id }]);
+        } finally {
+          await chmod(path, 0o644);
+        }
+      });
+    },
+  );
 });

@@ -11,6 +11,7 @@ import {
   type DbConnection,
   type ThreadHistoryEventRow,
 } from "@bb/db";
+import { ApiError } from "../../../errors.js";
 import type { AppDeps } from "../../../types.js";
 import {
   listSavedThreadFiles,
@@ -26,7 +27,7 @@ const INSERT_BATCH_ROWS = 16;
 const INSERT_BATCH_BYTES = 64 * 1024;
 const INSERT_SLICE_MS = 8;
 
-const heldByDb = new WeakMap<DbConnection, Map<string, number>>();
+const heldByDb = new WeakMap<DbConnection, Set<string>>();
 
 export function holdSavedThread(
   db: DbConnection,
@@ -34,18 +35,23 @@ export function holdSavedThread(
 ): () => void {
   let held = heldByDb.get(db);
   if (held === undefined) {
-    held = new Map();
+    held = new Set();
     heldByDb.set(db, held);
   }
+  if (held.has(threadId)) {
+    throw new ApiError(
+      409,
+      "saved_thread_busy",
+      `Thread ${threadId} is already being restored or imported; try again in a moment`,
+    );
+  }
   const holds = held;
-  holds.set(threadId, (holds.get(threadId) ?? 0) + 1);
+  holds.add(threadId);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const remaining = (holds.get(threadId) ?? 1) - 1;
-    if (remaining === 0) holds.delete(threadId);
-    else holds.set(threadId, remaining);
+    holds.delete(threadId);
   };
 }
 
@@ -160,10 +166,10 @@ export async function reconcileSavedThreads(
     await removeSavedThreadFile(deps.config.dataDir, saved.threadId);
   }
   for (const saved of listSavedThreadsInStates(deps.db, ["restoring"])) {
-    if (!(await savedThreadFileExists(deps.config.dataDir, saved.threadId))) {
-      deleteSavedThread(deps.db, saved.threadId);
-      continue;
-    }
+    const fileExists = await savedThreadFileExists(
+      deps.config.dataDir,
+      saved.threadId,
+    );
     deps.db.transaction(
       (tx) => {
         const now = Date.now();
@@ -171,11 +177,15 @@ export async function reconcileSavedThreads(
           hideThreadForSaving(tx, { now, threadId: saved.threadId });
           requestThreadPurge(tx, { now, threadId: saved.threadId });
         }
-        updateSavedThreadInState(tx, {
-          expectedState: "restoring",
-          patch: { state: "saved", updatedAt: now },
-          threadId: saved.threadId,
-        });
+        if (fileExists) {
+          updateSavedThreadInState(tx, {
+            expectedState: "restoring",
+            patch: { state: "saved", updatedAt: now },
+            threadId: saved.threadId,
+          });
+        } else {
+          deleteSavedThread(tx, saved.threadId);
+        }
       },
       { behavior: "immediate" },
     );

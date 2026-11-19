@@ -394,35 +394,79 @@ function existingId(
     : id;
 }
 
-function threadRowFixups(
+function insertRow(
   db: DbQueryConnection,
+  table: ThreadFileTable,
   values: Record<string, ThreadFileValue>,
-): Record<string, ThreadFileValue> {
-  return {
+): boolean {
+  const columns = tableColumns(db, table);
+  const entries = Object.entries(values).filter(([key]) => columns.has(key));
+  if (entries.length === 0) return false;
+  return (
+    db.run(sql`
+      INSERT OR IGNORE INTO ${sql.identifier(table)}
+        (${sql.join(entries.map(([key]) => sql.identifier(key)), sql`, `)})
+      VALUES (${sql.join(entries.map(([, value]) => sql`${value}`), sql`, `)})
+    `).changes > 0
+  );
+}
+
+export function insertHiddenThreadRow(
+  db: DbQueryConnection,
+  row: ThreadFileTableRow,
+  hiddenAt: number,
+): boolean {
+  if (row.table !== "threads") {
+    throw new Error(`Expected a threads row, got ${row.table}`);
+  }
+  const { values } = row;
+  return insertRow(db, "threads", {
     ...values,
     environment_id: existingId(db, "environments", values.environment_id),
     section_id: existingId(db, "thread_sections", values.section_id),
     parent_thread_id: existingId(db, "threads", values.parent_thread_id),
     source_thread_id: existingId(db, "threads", values.source_thread_id),
     lifecycle_owner_thread_id: existingId(db, "threads", values.lifecycle_owner_thread_id),
-    deleted_at: null,
-  };
+    deleted_at: hiddenAt,
+  });
 }
 
 export function insertThreadTableRow(
   db: DbQueryConnection,
   row: ThreadFileTableRow,
 ): boolean {
-  const values = row.table === "threads" ? threadRowFixups(db, row.values) : row.values;
-  const columns = tableColumns(db, row.table);
-  const entries = Object.entries(values).filter(([key]) => columns.has(key));
-  if (entries.length === 0) return false;
+  if (row.table === "threads") {
+    throw new Error("Insert a thread row with insertHiddenThreadRow");
+  }
+  return insertRow(db, row.table, row.values);
+}
+
+export function readThreadSaveFingerprint(
+  db: DbQueryConnection,
+  threadId: string,
+): string | null {
   return (
-    db.run(sql`
-      INSERT OR IGNORE INTO ${sql.identifier(row.table)}
-        (${sql.join(entries.map(([key]) => sql.identifier(key)), sql`, `)})
-      VALUES (${sql.join(entries.map(([, value]) => sql`${value}`), sql`, `)})
-    `).changes > 0
+    db.get<{ fingerprint: string }>(sql`
+      SELECT json_array(
+        t.updated_at,
+        t.archived_at,
+        t.pinned_at,
+        t.deleted_at,
+        (SELECT max(e.sequence) FROM events e WHERE e.thread_id = ${threadId}),
+        (SELECT json_group_array(json_array(m.plugin_id, m.metadata_json))
+          FROM thread_plugin_metadata m WHERE m.thread_id = ${threadId}),
+        (SELECT json_array(tabs.revision, tabs.updated_at)
+          FROM thread_tabs tabs WHERE tabs.thread_id = ${threadId}),
+        (SELECT json_array(count(*), max(p.request_sequence))
+          FROM prompt_history_entries p WHERE p.thread_id = ${threadId}),
+        (SELECT json_array(count(*), max(s.updated_at), total(length(s.text)))
+          FROM thread_search_segments s WHERE s.thread_id = ${threadId}),
+        (SELECT json_group_array(json_array(o.projection_key, length(o.items_json)))
+          FROM thread_conversation_outlines o WHERE o.thread_id = ${threadId})
+      ) AS fingerprint
+      FROM threads t
+      WHERE t.id = ${threadId}
+    `)?.fingerprint ?? null
   );
 }
 

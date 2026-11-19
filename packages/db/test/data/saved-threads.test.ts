@@ -8,11 +8,13 @@ import { createProject } from "../../src/data/projects.js";
 import { createQueuedThreadMessage } from "../../src/data/queued-thread-messages.js";
 import {
   THREAD_FILE_FORMAT_VERSION,
+  insertHiddenThreadRow,
   insertThreadHistoryRows,
   insertThreadTableRow,
   isThreadSavable,
   nextThreadSave,
   readThreadEventWindow,
+  readThreadSaveFingerprint,
   readThreadTableRows,
   restartThreadArchiveClock,
   upsertSavedThread,
@@ -311,10 +313,15 @@ describe("thread file rows", () => {
 
     context.db.run(sql`DELETE FROM threads WHERE id IN (${thread.id}, ${parent.id})`);
     context.db.run(sql`DELETE FROM environments`);
-    for (const row of rows) insertThreadTableRow(context.db, row);
+    const [threadRow, ...otherRows] = rows;
+    if (threadRow === undefined) throw new Error("Expected a thread row");
+    expect(() => insertThreadTableRow(context.db, threadRow)).toThrow();
+    insertHiddenThreadRow(context.db, threadRow, 1234);
+    for (const row of otherRows) insertThreadTableRow(context.db, row);
 
     expect(getThread(context.db, thread.id)).toEqual({
       ...before,
+      deletedAt: 1234,
       environmentId: null,
       parentThreadId: null,
     });
@@ -323,5 +330,90 @@ describe("thread file rows", () => {
         sql`SELECT metadata_json AS metadata FROM thread_plugin_metadata WHERE thread_id = ${thread.id}`,
       )?.metadata,
     ).toBe('{"pr":42}');
+  });
+
+  it("changes the save fingerprint for every change a thread file would capture", () => {
+    const context = setup();
+    const thread = seedThread(context);
+    const other = seedThread(context);
+    const fingerprint = () => readThreadSaveFingerprint(context.db, thread.id);
+    const changes: Array<[string, () => void]> = [
+      ["thread row", () => context.db.run(sql`UPDATE threads SET updated_at = updated_at + 1 WHERE id = ${thread.id}`)],
+      ["unarchive", () => context.db.run(sql`UPDATE threads SET archived_at = NULL WHERE id = ${thread.id}`)],
+      [
+        "event",
+        () =>
+          insertEvents(context.db, noopNotifier, [
+            {
+              threadId: thread.id,
+              environmentId: context.environment.id,
+              providerThreadId: "provider-thread-1",
+              scope: threadScope(),
+              sequence: 5,
+              type: "thread/identity",
+              itemId: null,
+              itemKind: null,
+              parentToolCallId: null,
+              data: "{}",
+            },
+          ]),
+      ],
+      [
+        "plugin metadata",
+        () =>
+          context.db.run(sql`
+            INSERT INTO thread_plugin_metadata (thread_id, plugin_id, metadata_json)
+            VALUES (${thread.id}, 'example', '{"pr":42}')
+          `),
+      ],
+      [
+        "plugin metadata value",
+        () =>
+          context.db.run(sql`
+            UPDATE thread_plugin_metadata SET metadata_json = '{"pr":43}' WHERE thread_id = ${thread.id}
+          `),
+      ],
+      [
+        "tabs",
+        () =>
+          context.db.run(sql`
+            INSERT INTO thread_tabs (thread_id, tabs_json, revision, updated_at)
+            VALUES (${thread.id}, '[]', 1, 1)
+          `),
+      ],
+      [
+        "prompt history",
+        () =>
+          context.db.run(sql`
+            INSERT INTO prompt_history_entries (id, project_id, thread_id, scope, request_sequence, input, created_at)
+            VALUES ('prompt-1', ${context.project.id}, ${thread.id}, 'thread', 1, '[]', 1)
+          `),
+      ],
+      [
+        "search segment",
+        () =>
+          context.db.run(sql`
+            INSERT INTO thread_search_segments (id, thread_id, source_kind, source_key, source_seq, text, created_at, updated_at)
+            VALUES ('segment-1', ${thread.id}, 'message', 'message-1', 3, 'first reply', 1, 1)
+          `),
+      ],
+      [
+        "outline",
+        () =>
+          context.db.run(sql`
+            INSERT INTO thread_conversation_outlines (thread_id, projection_key, items_json)
+            VALUES (${thread.id}, 'outline', '[]')
+          `),
+      ],
+    ];
+    for (const [label, change] of changes) {
+      const before = fingerprint();
+      change();
+      expect(fingerprint(), label).not.toBe(before);
+    }
+    const settled = fingerprint();
+    context.db.run(sql`UPDATE threads SET updated_at = updated_at + 1 WHERE id = ${other.id}`);
+    expect(fingerprint()).toBe(settled);
+    expect(readThreadSaveFingerprint(context.db, "thr_missing")).toBeNull();
   });
 });

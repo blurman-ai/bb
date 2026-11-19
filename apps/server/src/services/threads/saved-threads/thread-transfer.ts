@@ -9,12 +9,15 @@ import {
   getProject,
   getSavedThread,
   getThread,
+  insertHiddenThreadRow,
   insertThreadTableRow,
   listThreadAttachments,
   readThreadEventWindow,
   readThreadTableRowsPage,
+  THREAD_FILE_FORMAT_VERSION,
   THREAD_FILE_TABLES,
   updateSavedThreadInState,
+  upsertSavedThread,
   type DbConnection,
   type SavedThreadAttachment,
   type ThreadFileTableRow,
@@ -202,7 +205,10 @@ export class ThreadFileExport {
           this.deps.config.dataDir,
           this.projectId,
           attachment.storedPath,
-        ).catch(() => null);
+        ).catch((error: unknown) => {
+          if (error instanceof ApiError && error.status === 404) return null;
+          throw error;
+        });
         if (content === null) return true;
         const parts = Math.ceil(content.content.length / ATTACHMENT_PART_BYTES);
         this.writer.addAttachment({
@@ -345,20 +351,27 @@ async function restoreLinkedSavedThreads(
   }
 }
 
-async function restoreThreadRows(
+function requireImportProject(
   deps: SavedThreadDeps,
-  file: OpenThreadFile,
-  args: { recreate: boolean; visited: Set<string> },
-): Promise<void> {
-  const { threadId, projectId } = file.header;
-  const project = getProject(deps.db, projectId);
+  header: ThreadFileHeader,
+): void {
+  const project = getProject(deps.db, header.projectId);
   if (project === null || project.deletedAt !== null) {
     throw new ApiError(
       404,
       "project_not_found",
-      `Thread ${threadId} belongs to a project that isn't on this server. Importing a thread from another server isn't supported yet.`,
+      `Thread ${header.threadId} belongs to a project that isn't on this server. Importing a thread from another server isn't supported yet.`,
     );
   }
+}
+
+async function insertThreadFileRows(
+  deps: SavedThreadDeps,
+  file: OpenThreadFile,
+  args: { recreate: boolean; visited: Set<string> },
+): Promise<number> {
+  const { threadId, projectId } = file.header;
+  requireImportProject(deps, file.header);
   const { attachments, tables } = await readTablesAndAttachments(file);
   const threadRow = tables.find((row) => row.table === "threads");
   if (threadRow === undefined) {
@@ -370,7 +383,7 @@ async function restoreThreadRows(
   }
   if (args.recreate) {
     await restoreLinkedSavedThreads(deps, threadRow, args.visited);
-    insertThreadTableRow(deps.db, threadRow);
+    insertHiddenThreadRow(deps.db, threadRow, Date.now());
   }
   await insertInSlices(
     deps,
@@ -391,6 +404,7 @@ async function restoreThreadRows(
     attachments.map((attachment) => attachment.storedPath),
     "best-effort",
   );
+  return insertThreadFileEvents(deps, file);
 }
 
 function removeThreadAgain(deps: SavedThreadDeps, threadId: string): void {
@@ -405,111 +419,179 @@ function removeThreadAgain(deps: SavedThreadDeps, threadId: string): void {
   );
 }
 
-function claimForImport(
-  deps: SavedThreadDeps,
-  threadId: string,
-): {
-  finish(): void;
-  refill: boolean;
-  revert(): void;
-} {
-  const saved = getSavedThread(deps.db, threadId);
-  const noop = { finish() {}, refill: false, revert() {} };
-  if (
-    saved === null ||
-    saved.state === "restoring" ||
-    saved.state === "restored"
-  ) {
-    return noop;
-  }
-  if (saved.state === "saving") {
-    deleteSavedThread(deps.db, threadId);
-    return noop;
-  }
-  const refill = deps.db.transaction(
-    (tx) => {
-      updateSavedThreadInState(tx, {
-        expectedState: "saved",
-        patch: { state: "restoring", updatedAt: Date.now() },
-        threadId,
-      });
-      if (getThread(tx, threadId) === null) return false;
-      cancelThreadPurge(tx, threadId);
-      unhideSavedThread(tx, threadId);
-      return true;
-    },
-    { behavior: "immediate" },
-  );
-  return {
-    finish() {
-      const now = Date.now();
-      deps.db.transaction(
-        (tx) => {
-          updateSavedThreadInState(tx, {
-            expectedState: "restoring",
-            patch: { restoredAt: now, state: "restored", updatedAt: now },
-            threadId,
-          });
-          restartThreadArchiveClock(tx, { now, threadId });
-        },
-        { behavior: "immediate" },
-      );
-    },
-    refill,
-    revert() {
-      removeThreadAgain(deps, threadId);
-      updateSavedThreadInState(deps.db, {
-        expectedState: "restoring",
-        patch: { state: "saved", updatedAt: Date.now() },
-        threadId,
-      });
-    },
-  };
+function asImportError(error: unknown): unknown {
+  return error instanceof ThreadFileError
+    ? new ApiError(400, "invalid_thread_file", error.message)
+    : error;
 }
 
-async function importOpenFile(
+function notifyThreadReturned(
+  deps: SavedThreadDeps,
+  header: ThreadFileHeader,
+  change: "thread-created" | "history-rewritten",
+): void {
+  deps.hub.notifyThread(header.threadId, [change], {
+    projectId: header.projectId,
+  });
+  deps.hub.notifyProject(header.projectId, ["threads-changed"]);
+}
+
+async function restoreFromSavedFile(
   deps: SavedThreadDeps,
   file: OpenThreadFile,
   visited: Set<string>,
 ): Promise<ThreadFileImportResult> {
-  const { threadId, projectId } = file.header;
+  const { threadId } = file.header;
   visited.add(threadId);
-  const release = holdSavedThread(deps.db, threadId);
-  try {
-    const claim = claimForImport(deps, threadId);
-    const recreated = getThread(deps.db, threadId) === null;
-    let insertedRows: number;
-    try {
-      if (recreated || claim.refill) {
-        await restoreThreadRows(deps, file, { recreate: recreated, visited });
+  const recreate = deps.db.transaction(
+    (tx) => {
+      if (
+        !updateSavedThreadInState(tx, {
+          expectedState: "saved",
+          patch: { state: "restoring", updatedAt: Date.now() },
+          threadId,
+        })
+      ) {
+        throw new ApiError(
+          404,
+          "saved_thread_not_found",
+          "Saved thread not found",
+        );
       }
+      cancelThreadPurge(tx, threadId);
+      return getThread(tx, threadId) === null;
+    },
+    { behavior: "immediate" },
+  );
+  let insertedRows: number;
+  try {
+    insertedRows = await insertThreadFileRows(deps, file, {
+      recreate,
+      visited,
+    });
+  } catch (error) {
+    removeThreadAgain(deps, threadId);
+    updateSavedThreadInState(deps.db, {
+      expectedState: "restoring",
+      patch: { state: "saved", updatedAt: Date.now() },
+      threadId,
+    });
+    throw asImportError(error);
+  }
+  deps.db.transaction(
+    (tx) => {
+      const now = Date.now();
+      unhideSavedThread(tx, threadId);
+      updateSavedThreadInState(tx, {
+        expectedState: "restoring",
+        patch: { restoredAt: now, state: "restored", updatedAt: now },
+        threadId,
+      });
+      restartThreadArchiveClock(tx, { now, threadId });
+    },
+    { behavior: "immediate" },
+  );
+  await removeSavedThreadFile(deps.config.dataDir, threadId);
+  notifyThreadReturned(
+    deps,
+    file.header,
+    recreate ? "thread-created" : "history-rewritten",
+  );
+  deps.logger.info(
+    { threadId, rows: file.table.rows, insertedRows },
+    "Saved thread restored",
+  );
+  return { insertedRows, rows: file.table.rows, threadId };
+}
+
+async function recreateFromImportedFile(
+  deps: SavedThreadDeps,
+  file: OpenThreadFile,
+): Promise<number> {
+  const { header } = file;
+  requireImportProject(deps, header);
+  const now = Date.now();
+  upsertSavedThread(deps.db, {
+    archivedAt: header.archivedAt,
+    formatVersion: THREAD_FILE_FORMAT_VERSION,
+    packedBytes: 0,
+    projectId: header.projectId,
+    providerId: header.providerId,
+    rawBytes: 0,
+    restoredAt: null,
+    rowCount: 0,
+    savedAt: null,
+    state: "restoring",
+    threadCreatedAt: header.createdAt,
+    threadId: header.threadId,
+    throughSequence: 0,
+    title: header.title,
+    updatedAt: now,
+  });
+  let insertedRows: number;
+  try {
+    insertedRows = await insertThreadFileRows(deps, file, {
+      recreate: true,
+      visited: new Set([header.threadId]),
+    });
+  } catch (error) {
+    removeThreadAgain(deps, header.threadId);
+    deleteSavedThread(deps.db, header.threadId);
+    throw asImportError(error);
+  }
+  deps.db.transaction(
+    (tx) => {
+      unhideSavedThread(tx, header.threadId);
+      deleteSavedThread(tx, header.threadId);
+    },
+    { behavior: "immediate" },
+  );
+  return insertedRows;
+}
+
+async function importIntoThread(
+  deps: SavedThreadDeps,
+  file: OpenThreadFile,
+): Promise<ThreadFileImportResult> {
+  const { threadId } = file.header;
+  const saved = getSavedThread(deps.db, threadId);
+  if (saved?.state === "saved" || saved?.state === "restoring") {
+    throw new ApiError(
+      409,
+      "saved_thread_busy",
+      `Thread ${threadId} was saved to a file while this import started; try again`,
+    );
+  }
+  if (saved?.state === "saving") deleteSavedThread(deps.db, threadId);
+  const thread = getThread(deps.db, threadId);
+  if (thread !== null && thread.deletedAt !== null) {
+    throw new ApiError(
+      409,
+      "thread_being_deleted",
+      `Thread ${threadId} is still being deleted. Import the file again once the deletion finishes.`,
+    );
+  }
+  const recreated = thread === null;
+  let insertedRows: number;
+  if (recreated) {
+    insertedRows = await recreateFromImportedFile(deps, file);
+  } else {
+    try {
       insertedRows = await insertThreadFileEvents(deps, file);
     } catch (error) {
-      if (recreated) removeThreadAgain(deps, threadId);
-      claim.revert();
-      if (error instanceof ThreadFileError) {
-        throw new ApiError(400, "invalid_thread_file", error.message);
-      }
-      throw error;
+      throw asImportError(error);
     }
-    claim.finish();
-    if (getSavedThread(deps.db, threadId)?.state === "restored") {
-      await removeSavedThreadFile(deps.config.dataDir, threadId);
-    }
-    deps.hub.notifyThread(
-      threadId,
-      [recreated ? "thread-created" : "history-rewritten"],
-      { projectId },
-    );
-    deps.hub.notifyProject(projectId, ["threads-changed"]);
-    deps.logger.info(
-      { threadId, rows: file.table.rows, insertedRows, recreated },
-      "Thread file imported",
-    );
-    return { insertedRows, rows: file.table.rows, threadId };
-  } finally {
-    release();
   }
+  notifyThreadReturned(
+    deps,
+    file.header,
+    recreated ? "thread-created" : "history-rewritten",
+  );
+  deps.logger.info(
+    { threadId, rows: file.table.rows, insertedRows, recreated },
+    "Thread file imported",
+  );
+  return { insertedRows, rows: file.table.rows, threadId };
 }
 
 export async function importThreadFile(
@@ -518,7 +600,16 @@ export async function importThreadFile(
 ): Promise<ThreadFileImportResult> {
   const file = await openForImport(path);
   try {
-    return await importOpenFile(deps, file, new Set());
+    const { threadId } = file.header;
+    if (getSavedThread(deps.db, threadId)?.state === "saved") {
+      await restoreSavedThreadWith(deps, threadId, new Set());
+    }
+    const release = holdSavedThread(deps.db, threadId);
+    try {
+      return await importIntoThread(deps, file);
+    } finally {
+      release();
+    }
   } finally {
     await file.close();
   }
@@ -529,24 +620,33 @@ async function restoreSavedThreadWith(
   threadId: string,
   visited: Set<string>,
 ): Promise<ThreadFileImportResult> {
-  const saved = getSavedThread(deps.db, threadId);
-  if (saved?.state !== "saved") {
-    throw new ApiError(404, "saved_thread_not_found", "Saved thread not found");
-  }
-  if (!(await savedThreadFileExists(deps.config.dataDir, threadId))) {
-    throw new ApiError(
-      409,
-      "saved_thread_file_missing",
-      `The file for saved thread ${threadId} is missing`,
-    );
-  }
-  const file = await openForImport(
-    savedThreadFilePath(deps.config.dataDir, threadId),
-  );
+  const release = holdSavedThread(deps.db, threadId);
   try {
-    return await importOpenFile(deps, file, visited);
+    const saved = getSavedThread(deps.db, threadId);
+    if (saved?.state !== "saved") {
+      throw new ApiError(
+        404,
+        "saved_thread_not_found",
+        "Saved thread not found",
+      );
+    }
+    if (!(await savedThreadFileExists(deps.config.dataDir, threadId))) {
+      throw new ApiError(
+        409,
+        "saved_thread_file_missing",
+        `The file for saved thread ${threadId} is missing`,
+      );
+    }
+    const file = await openForImport(
+      savedThreadFilePath(deps.config.dataDir, threadId),
+    );
+    try {
+      return await restoreFromSavedFile(deps, file, visited);
+    } finally {
+      await file.close();
+    }
   } finally {
-    await file.close();
+    release();
   }
 }
 

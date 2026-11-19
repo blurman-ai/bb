@@ -715,9 +715,11 @@ export interface ThreadsArea {
    */
   experimental_export(args: ThreadActionArgs): Promise<Uint8Array>;
   /**
-   * Import a thread file: merges the events a thread already in the database
-   * lacks, or recreates a deleted thread in its project. Rejects a file whose
-   * project is not on this server. Experimental: see docs/api_to_audit.md.
+   * Import a thread file: restores a saved thread from its own saved file
+   * first, then merges the events a thread already in the database lacks, or
+   * recreates a deleted thread in its project. Rejects a file whose project is
+   * not on this server, and a thread that is still being deleted.
+   * Experimental: see docs/api_to_audit.md.
    */
   experimental_import(args: ThreadImportArgs): Promise<ThreadImportResult>;
   /**

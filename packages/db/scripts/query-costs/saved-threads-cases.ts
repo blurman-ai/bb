@@ -3,6 +3,7 @@ import {
   deleteSavedThread,
   getSavedThread,
   hideThreadForSaving,
+  insertHiddenThreadRow,
   insertThreadHistoryRows,
   insertThreadTableRow,
   isThreadSavable,
@@ -12,6 +13,7 @@ import {
   listThreadAttachments,
   nextThreadSave,
   readThreadEventWindow,
+  readThreadSaveFingerprint,
   readThreadTableRows,
   readThreadTableRowsPage,
   restartThreadArchiveClock,
@@ -214,9 +216,28 @@ const SAVED_THREAD_CASES: readonly QueryCostCase<SavedThreadsSeed>[] = [
     run: (db, fixture) => readThreadTableRows(db, fixture.threadId),
   },
   {
-    name: `${SAVED}#insertThreadTableRow`,
+    name: `${SAVED}#insertHiddenThreadRow`,
     run: (db, _fixture, seed) =>
-      insertThreadTableRow(db, restoredThreadRow(seed)),
+      insertHiddenThreadRow(db, restoredThreadRow(seed), Date.now()),
+  },
+  {
+    name: `${SAVED}#insertThreadTableRow`,
+    prepare: (db, _fixture, seed) => {
+      insertHiddenThreadRow(db, restoredThreadRow(seed), Date.now());
+    },
+    run: (db) =>
+      insertThreadTableRow(db, {
+        table: "thread_plugin_metadata",
+        values: {
+          thread_id: RESTORED_THREAD_ID,
+          plugin_id: "query-costs",
+          metadata_json: '{"pr":42}',
+        },
+      }),
+  },
+  {
+    name: `${SAVED}#readThreadSaveFingerprint`,
+    run: (db, fixture) => readThreadSaveFingerprint(db, fixture.threadId),
   },
   {
     name: `${SAVED}#listThreadAttachments`,
@@ -225,7 +246,7 @@ const SAVED_THREAD_CASES: readonly QueryCostCase<SavedThreadsSeed>[] = [
   {
     name: `${SAVED}#insertThreadHistoryRows`,
     prepare: (db, _fixture, seed) => {
-      insertThreadTableRow(db, restoredThreadRow(seed));
+      insertHiddenThreadRow(db, restoredThreadRow(seed), Date.now());
     },
     run: (db, _fixture, seed) =>
       insertThreadHistoryRows(db, {

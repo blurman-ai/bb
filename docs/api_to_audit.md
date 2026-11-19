@@ -1280,19 +1280,25 @@ A seek table sits in a zstd skippable frame.
 
 - `GET /threads/:id/export` writes one for a thread in the database.
 - `POST /threads/import` takes a file as the multipart `file` field. If the
-  thread exists, it inserts the events the thread lacks (`INSERT OR IGNORE`);
-  if not, it recreates the thread in its project, restoring a saved parent or
-  source thread first. It answers `{ threadId, rows, insertedRows }`: 404 when
-  the project is not on this server, 400 for a file that is not a thread file
-  or uses a format version this bb does not read.
+  thread is saved, it first restores the server's own saved file, so an older
+  export can't replace newer history. If the thread exists, it then inserts the
+  events the thread lacks (`INSERT OR IGNORE`); if not, it recreates the thread
+  in its project, restoring a saved parent or source thread first. It answers
+  `{ threadId, rows, insertedRows }`: 404 when the project is not on this
+  server, 400 for a file that is not a thread file or uses a format version
+  this bb does not read, and 409 while the thread is still being deleted or
+  another restore or import of it is running.
 - `POST /threads/:id/save` records a save request. The `thread-save` item
   sweep exports and verifies the file in paced slices, then hides the thread
   and queues it for the `thread-purge` sweep that removes its rows; a failure
   is backed off by the sweep runner and retried. It answers with the `saving`
   entry, or 409 while the thread is pinned, running, open in a client, already
   being saved, has pending work, or is a parent, source or lifecycle owner of a
-  thread still in the database. Restoring a thread whose rows are still being
-  purged cancels the purge and refills what it had removed; a restored
+  thread still in the database. A save whose thread changes while it is
+  written (a new event, its row, plugin metadata, tabs, prompt history, search
+  rows or outline) is dropped instead of finished. Restoring a thread whose
+  rows are still being purged cancels the purge and refills what it had
+  removed; the thread stays hidden until every row is back. A restored
   archived thread's `archivedAt` restarts at the restore time.
 - `GET /saved-threads` lists saved threads (`saving`, `saved`),
   `POST /saved-threads/:id/restore` imports a saved file,

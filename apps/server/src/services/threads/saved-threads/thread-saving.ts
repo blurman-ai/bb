@@ -8,6 +8,7 @@ import {
   hideThreadForSaving,
   isThreadSavable,
   nextThreadSave,
+  readThreadSaveFingerprint,
   requestThreadPurge,
   updateSavedThreadInState,
   upsertSavedThread,
@@ -33,18 +34,18 @@ type ThreadRow = NonNullable<ReturnType<typeof getThread>>;
 
 interface ExportTask {
   exporter: ThreadFileExport;
+  fingerprint: string;
   kind: "export";
-  throughSequence: number | null;
 }
 
 interface VerifyTask {
+  fingerprint: string;
   frameIndex: number;
   frames: ThreadFileFrameEntry[];
   kind: "verify";
   packedBytes: number;
   rawBytes: number;
   rows: number;
-  throughSequence: number | null;
   verifiedRows: number;
 }
 
@@ -152,7 +153,10 @@ async function startTask(
   threadId: string,
 ): Promise<SaveTask> {
   const thread = getThread(deps.db, threadId);
-  if (thread === null) throw new SaveAbandoned("Thread no longer exists");
+  const fingerprint = readThreadSaveFingerprint(deps.db, threadId);
+  if (thread === null || fingerprint === null) {
+    throw new SaveAbandoned("Thread no longer exists");
+  }
   const throughSequence = getLatestThreadSequence(deps.db, { threadId });
   const exporter = await ThreadFileExport.start(deps, {
     path: savedThreadFilePath(deps.config.dataDir, threadId),
@@ -168,7 +172,7 @@ async function startTask(
       throughSequence,
     }),
   );
-  return { exporter, kind: "export", throughSequence };
+  return { exporter, fingerprint, kind: "export" };
 }
 
 async function advanceTask(
@@ -188,13 +192,13 @@ async function advanceTask(
     const frames = file.table.frames;
     await file.close();
     return {
+      fingerprint: task.fingerprint,
       frameIndex: 0,
       frames,
       kind: "verify",
       packedBytes: sealed.packedBytes,
       rawBytes: sealed.rawBytes,
       rows: sealed.rows,
-      throughSequence: task.throughSequence,
       verifiedRows: 0,
     };
   }
@@ -230,7 +234,7 @@ function finishSave(
   const thread = getThread(deps.db, threadId);
   const saved = deps.db.transaction(
     (tx) => {
-      if (getLatestThreadSequence(tx, { threadId }) !== task.throughSequence) {
+      if (readThreadSaveFingerprint(tx, threadId) !== task.fingerprint) {
         return false;
       }
       if (

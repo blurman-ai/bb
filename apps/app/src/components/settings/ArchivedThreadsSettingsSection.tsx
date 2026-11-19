@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@bb/shared-ui/dropdown-menu";
 import { EmptyStatePanel } from "@bb/shared-ui/empty-state";
+import { formatByteSize } from "@bb/shared-ui/lib/format-byte-size";
 import { Icon, type IconName } from "@bb/shared-ui/icon";
 import { Input } from "@bb/shared-ui/input";
 import { Pill } from "@bb/shared-ui/pill";
@@ -112,13 +113,9 @@ function filterArchivedThreadsBySearch(
   });
 }
 
-function formatMegabytes(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function savedThreadStatus(entry: SavedThreadResponse): string {
   if (entry.state !== "saved" || entry.savedAt === null) return "Saving…";
-  return `Saved ${formatRelativeTime({ timestamp: entry.savedAt, now: Date.now() })} · ${formatMegabytes(entry.packedBytes)}`;
+  return `Saved ${formatRelativeTime({ timestamp: entry.savedAt, now: Date.now() })} · ${formatByteSize(entry.packedBytes)}`;
 }
 
 function SavedThreadsList({
